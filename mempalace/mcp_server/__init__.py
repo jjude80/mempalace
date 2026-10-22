@@ -98,6 +98,7 @@ from ..backends.chroma import (  # noqa: E402
     ChromaCollection,
     _clear_chroma_system_cache,
     _is_own_db_stamp,
+    _is_stale_bindings_client,
     _note_own_db_stamp,
     _pin_hnsw_threads,
     chroma_system_generation,
