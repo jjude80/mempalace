@@ -663,6 +663,70 @@ def _decorate_mcp_tool_result(tool_name: str, result):
     return result
 
 
+# The storage failures an agent must not be able to mistake for "there is
+# nothing in memory". ``mempalace_search`` answers a broken palace with
+# ``{"results": [], "error": ...}`` and ``mempalace_diary_read`` with
+# ``{"error": ...}``, and an agent that reads only the payload concludes the
+# memory is empty (NEXA-423). MCP has a channel for exactly this: ``isError``
+# on the tool result.
+#
+# Only the storage failures are marked. A validation error — a bad wing name,
+# a duplicate id — is an answer the caller asked for and stays a plain
+# result, so nothing that used to be answered stops being answered.
+_STORAGE_FAILURE_ERRORS = frozenset(
+    {
+        "Backend open failed",
+        "Backend mismatch",
+        "Chroma database missing",
+        "Duplicate check failed",
+        "Failed to read diary entries",
+        "No palace found",
+        "Unknown backend",
+    }
+)
+
+# The searcher builds its envelopes with the cause appended, so the storage
+# failures it reports arrive as a prefix rather than a fixed string.
+_STORAGE_FAILURE_ERROR_PREFIXES = ("Backend error", "Search error")
+
+
+def _mcp_result_is_storage_failure(result) -> bool:
+    """True when a tool result reports that the palace could not be read.
+
+    Storage failures only: a result that carries an ``error`` for any other
+    reason is still an answer, not a broken read.
+    """
+    if not isinstance(result, dict):
+        return False
+    error = result.get("error")
+    if not isinstance(error, str):
+        return False
+    if error in _STORAGE_FAILURE_ERRORS:
+        return True
+    return error.startswith(_STORAGE_FAILURE_ERROR_PREFIXES)
+
+
+def _mcp_tool_result_response(req_id, result):
+    """Build the JSON-RPC response for a tool call that returned a payload.
+
+    The payload is delivered as-is in ``content``. When the payload reports
+    that the palace could not be read, the call is additionally marked
+    ``isError`` so the failure cannot be mistaken for an empty memory
+    (NEXA-423). Marking does not change the payload: a caller that reads the
+    text still sees the same error it saw before.
+    """
+    response = {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "result": {
+            "content": [{"type": "text", "text": json.dumps(result, indent=2, ensure_ascii=False)}]
+        },
+    }
+    if _mcp_result_is_storage_failure(result):
+        response["result"]["isError"] = True
+    return response
+
+
 def _normalize_envelope(request: dict) -> "tuple[str, dict]":
     """Read `method` and `params` off a request without raising.
 
@@ -835,15 +899,7 @@ def handle_request(request):
                     tool_name, TOOLS[tool_name]["handler"](**tool_args)
                 )
 
-            return {
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "content": [
-                        {"type": "text", "text": json.dumps(result, indent=2, ensure_ascii=False)}
-                    ]
-                },
-            }
+            return _mcp_tool_result_response(req_id, result)
         except TypeError as e:
             # Qualname match prevents leaking internal helper/param names raised
             # inside the handler body — see test_handler_internal_signature_shape_stays_generic.
