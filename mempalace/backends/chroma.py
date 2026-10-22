@@ -2204,6 +2204,55 @@ def _fix_missing_collection_type(palace_path: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _is_stale_bindings_client(client) -> bool:
+    """True when chroma stopped the shared ``System`` out from under ``client``.
+
+    ``SharedSystemClient`` refcounts one ``System`` per persist path, and
+    ``System.stop()`` runs ``del self.bindings`` on the rust API (chroma
+    ``RustBindingsAPI.stop``). Any client that outlived the last ``close()`` —
+    or a failed ``Client.__init__``, whose exception handler releases the
+    system it was building — keeps pointing at that stopped System. Every
+    later call on it raises::
+
+        AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'
+
+    and so does every ``PersistentClient(path=...)`` issued while the stopped
+    System is still the one chroma's map returns for that path. A fresh process
+    is unaffected, which is why the hub served empty search results for 32
+    hours while a CLI search in a new process worked (NEXA-339).
+
+    The check is attribute-based, not exception-based: the failure surfaces at
+    an arbitrary call site (open, get, query, count) and the layers above turn
+    it into a bare error string or a "No palace found" result.
+    """
+    try:
+        server = getattr(client, "_server", None)
+    except Exception:
+        return False
+    if server is None:
+        return False
+    return getattr(server, "bindings", None) is None
+
+
+def _looks_like_stopped_system(error: Exception) -> bool:
+    """True when ``error`` is what chroma raises against a stopped System.
+
+    Two shapes, both from the same cause:
+
+    * ``AttributeError: 'RustBindingsAPI' object has no attribute 'bindings'`` —
+      the bindings are gone (stopped, or ``start()`` never completed).
+    * ``ValueError: Could not connect to tenant <name>. Are you sure it
+      exists?`` — ``Client.__init__`` → ``_validate_tenant_database`` failed
+      because the tenant probe hit those same missing bindings. The message
+      blames the tenant, which does not exist as a cause here.
+    """
+    if isinstance(error, AttributeError):
+        return "bindings" in str(error)
+    if isinstance(error, ValueError):
+        return "could not connect to tenant" in str(error).lower()
+    return False
+
+
 def _as_list(v: Any) -> list:
     """Coerce possibly-None scalar-or-list into a list (defensive for chroma nulls)."""
     if v is None:
@@ -3039,6 +3088,25 @@ class ChromaBackend(BaseBackend):
             raise BackendClosedError("ChromaBackend has been closed")
 
         cached = self._clients.get(palace_path)
+        if cached is not None and _is_stale_bindings_client(cached):
+            # NEXA-339: chroma stopped the shared System while this client was
+            # still cached (its refcount was released by a close() elsewhere, or
+            # by a failed Client.__init__ in another thread). The handle is
+            # dead — every call on it raises
+            # 'RustBindingsAPI' object has no attribute 'bindings'.
+            # Repair here, at the single point where every backend operation
+            # acquires a client, rather than at each call site. Close what we
+            # own first so those close() calls can still decrement refcounts,
+            # then drop chroma's system map: it can still hold the stopped
+            # System, and a plain reopen would hand the same dead bindings
+            # back. The rebuild below then runs on a cold cache.
+            logger.warning(
+                "Reopening palace %s: cached chroma client lost its rust bindings",
+                palace_path,
+            )
+            self._drain_clients()
+            _clear_chroma_system_cache()
+            cached = None
         cached_inode, cached_mtime = self._freshness.get(palace_path, (0, 0.0))
         current_inode, current_mtime = self._db_stat(palace_path)
 
@@ -3193,9 +3261,27 @@ class ChromaBackend(BaseBackend):
 
         Quarantines HNSW segments on first open and after any detected
         disk change. See :attr:`_quarantined_paths` for the gate logic.
+
+        Retries once after dropping chroma's shared system map when the
+        construction fails against a stopped System (NEXA-339): chroma hands
+        back the cached System for a persist path, and a stopped one has had
+        its rust bindings deleted, so both ``AttributeError`` (no attribute
+        'bindings') and ``ValueError`` (Could not connect to tenant) come back
+        from a System that is not actually unusable-on-disk.
         """
         ChromaBackend._prepare_palace_for_open(palace_path)
-        return chromadb.PersistentClient(path=palace_path)
+        try:
+            return chromadb.PersistentClient(path=palace_path)
+        except Exception as exc:
+            if not _looks_like_stopped_system(exc):
+                raise
+            logger.warning(
+                "Retrying palace %s open after a stopped chroma System: %s",
+                palace_path,
+                exc,
+            )
+            _clear_chroma_system_cache()
+            return chromadb.PersistentClient(path=palace_path)
 
     @staticmethod
     def backend_version() -> str:

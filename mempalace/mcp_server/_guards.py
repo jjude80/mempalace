@@ -1092,6 +1092,14 @@ def _is_transient_index_error(result) -> bool:
     # HNSW flush window after a bulk CLI mine — SQLite rows are
     # committed but the binary segment metadata isn't flushed yet.
     # Self-heals once the flush completes (~30-60s). See issue #1315.
+    #
+    # Also covers a stopped shared System (NEXA-339): chroma's
+    # SharedSystemClient refcounts one System per persist path and
+    # System.stop() deletes the rust bindings, so a client cached across that
+    # stop raises "'RustBindingsAPI' object has no attribute 'bindings'" on
+    # every call. Dropping the caches and retrying rebuilds against a fresh
+    # System, which is exactly the recovery this retry performs. Without it the
+    # hub returned that error on every search until it was restarted.
     if not isinstance(result, dict):
         return False
     err = result.get("error", "")
@@ -1103,6 +1111,8 @@ def _is_transient_index_error(result) -> bool:
         or "internal error" in err_l
         or "stale-index" in err_l
         or "stale index" in err_l
+        or ("rustbindingsapi" in err_l and "bindings" in err_l)
+        or "could not connect to tenant" in err_l
     )
 
 
