@@ -93,6 +93,7 @@ from ..backends.chroma import (  # noqa: E402
     ChromaBackend,
     ChromaCollection,
     _HNSW_WRITE_DEFAULTS,
+    _is_stale_bindings_client,
     _pin_hnsw_threads,
     hnsw_capacity_status,
     reset_hnsw_capacity_cache,

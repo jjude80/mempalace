@@ -53,7 +53,18 @@ def _get_client():
     inode_changed = current_inode != 0 and current_inode != _palace_db_inode
     mtime_changed = current_mtime != 0.0 and abs(current_mtime - _palace_db_mtime) > 0.01
 
-    if _client_cache is None or inode_changed or mtime_changed:
+    # A cached client whose chroma System was stopped is dead: chroma's
+    # ``RustBindingsAPI.stop()`` does ``del self.bindings``, so every call on
+    # the client raises ``AttributeError: 'RustBindingsAPI' object has no
+    # attribute 'bindings'``. The backend layer repairs this for the clients
+    # it owns (``ChromaBackend._client``, NEXA-339); the session layer needs
+    # the same check, or every tool that reads through the session
+    # collection — ``mempalace_diary_read``, ``mempalace_status``,
+    # ``mempalace_check_duplicate`` — stays dark until somebody runs a
+    # manual ``mempalace_reconnect`` (NEXA-423).
+    stale_bindings = _client_cache is not None and _is_stale_bindings_client(_client_cache)
+
+    if _client_cache is None or inode_changed or mtime_changed or stale_bindings:
         # Run the HNSW capacity probe BEFORE chromadb opens the segment --
         # if the index is severely undersized, segment load can segfault
         # the whole MCP server (#1222). The probe is pure sqlite +
@@ -67,6 +78,15 @@ def _get_client():
             # persists its outdated index over the peer's writes, driving the
             # persisted count backwards. Drop chromadb's shared cache first so
             # make_client() rebuilds the segment from the on-disk state.
+            _force_chroma_cache_reset()
+        elif stale_bindings:
+            # The stopped System is still in chroma's shared map, so a plain
+            # reopen would hand back the same dead bindings. Drop the map
+            # first, then rebuild on a fresh System.
+            logger.warning(
+                "Reopening palace %s: cached session chroma client lost its rust bindings",
+                _config.palace_path,
+            )
             _force_chroma_cache_reset()
         _client_cache = ChromaBackend.make_client(_config.palace_path)
         _collection_cache = None
@@ -301,14 +321,11 @@ def _get_collection(create=False):
                 # Reset all caches so the next attempt forces _get_client()
                 # to rebuild the chromadb client from scratch, reopening
                 # the collection cleanly and healing the common
-                # stale-handle case.
-                _client_cache = None
-                _collection_cache = None
-                _collection_cache_backend = None
-                _collection_cache_palace = None
-                _palace_db_inode = 0
-                _palace_db_mtime = 0.0
-                _invalidate_overview_caches()
+                # stale-handle case. The full reset also drops chroma's
+                # shared System map: a stopped System stays in that map,
+                # so a plain reopen hands back the same dead bindings and
+                # the retry fails the same way (NEXA-423).
+                _force_chroma_cache_reset()
                 _collection_open_error = {
                     "error": "Backend open failed",
                     "details": "Could not open the Chroma collection.",
