@@ -663,18 +663,56 @@ def _tool_result_is_error(result) -> bool:
     Tool errors are otherwise plain ``{"error": ...}`` results. The failures
     that refuse every read and write until the config or the palace is fixed
     (a misspelled ``embedding_model``, a palace built with a different
-    model, a collection that will not open), and an openai-compat endpoint
-    that cannot be reached, also set MCP's ``isError`` for clients that only
-    check the flag. Model errors are matched by the
-    exception class they were built from (``error_class``, set by
-    ``embedding.model_error_result``); an open failure by its ``error``.
+    model, a collection that will not open), an openai-compat endpoint
+    that cannot be reached, and a palace that could not be read at all also
+    set MCP's ``isError`` for clients that only check the flag. Model errors
+    are matched by the exception class they were built from
+    (``error_class``, set by ``embedding.model_error_result``); an open
+    failure by its ``error``.
+
+    Marking a storage failure does not change the payload: a caller that reads
+    the text still sees the same error. It exists because an agent that reads
+    only the payload otherwise sees ``mempalace_search`` answer
+    ``{"results": [], "error": ...}`` as "there is nothing in memory".
+    Validation errors are answers the caller asked for and stay plain
+    results.
     """
     if not isinstance(result, dict):
         return False
+    error = result.get("error")
     return (
         result.get("error_class") in MODEL_ERROR_CLASS_NAMES
-        or result.get("error") == BACKEND_OPEN_FAILED_ERROR
+        or error == BACKEND_OPEN_FAILED_ERROR
+        or _is_storage_failure_error(error)
     )
+
+
+# The storage failures an agent must not be able to mistake for "there is
+# nothing in memory". Only the failures that mean the palace could not be read
+# belong here; a validation error is an answer, not a broken read.
+_STORAGE_FAILURE_ERRORS = frozenset(
+    {
+        "Backend mismatch",
+        "Chroma database missing",
+        "Duplicate check failed",
+        "Failed to read diary entries",
+        "No palace found",
+        "Unknown backend",
+    }
+)
+
+# The searcher builds its envelopes with the cause appended, so the storage
+# failures it reports arrive as a prefix rather than a fixed string.
+_STORAGE_FAILURE_ERROR_PREFIXES = ("Backend error", "Search error")
+
+
+def _is_storage_failure_error(error) -> bool:
+    """True when a tool result reports that the palace could not be read."""
+    if not isinstance(error, str):
+        return False
+    if error in _STORAGE_FAILURE_ERRORS:
+        return True
+    return error.startswith(_STORAGE_FAILURE_ERROR_PREFIXES)
 
 
 def _tool_call_response(req_id, result) -> dict:
