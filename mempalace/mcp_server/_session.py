@@ -144,6 +144,18 @@ def _get_client():
     client_is_current = (
         _client_cache is not None and _client_system_generation == chroma_system_generation()
     )
+    if _client_cache is not None and _is_stale_bindings_client(_client_cache):
+        # A stopped shared System: chroma stopped it while this client was cached, so its rust bindings are gone. The freshness stat does
+        # not move on an idle palace, so without this check the dead client is
+        # served forever. Drop the session and backend caches and chroma's
+        # shared System map — a plain reopen hands the same stopped System
+        # back — then rebuild below on a fresh System.
+        logger.warning(
+            "Reopening palace %s: session chroma client lost its rust bindings",
+            _config.palace_path,
+        )
+        _force_chroma_cache_reset()
+        client_is_current = False
     if (
         client_is_current
         and mtime_changed
@@ -479,14 +491,10 @@ def _get_collection(create=False):
                 # Reset all caches so the next attempt forces _get_client()
                 # to rebuild the chromadb client from scratch, reopening
                 # the collection cleanly and healing the common
-                # stale-handle case.
-                _client_cache = None
-                _collection_cache = None
-                _collection_cache_backend = None
-                _collection_cache_palace = None
-                _palace_db_inode = 0
-                _palace_db_mtime = 0.0
-                _invalidate_overview_caches()
+                # stale-handle case. The shared System map is part of that
+                # reset: a stopped System stays in chroma's map, so a plain
+                # reopen hands back the same dead rust bindings.
+                _force_chroma_cache_reset()
                 _collection_open_error = {
                     "error": BACKEND_OPEN_FAILED_ERROR,
                     "details": "Could not open the Chroma collection.",
