@@ -157,13 +157,20 @@ def _open_collection_or_explain(
         emit(f"\n  Backend mismatch at {palace_path}: {e}")
         emit("  Select the matching backend or use a fresh palace directory.")
         return None
-    except KeyError as e:
+    except BackendUnavailableError as e:
         # Unknown backend name (e.g. a typo in MEMPALACE_BACKEND/--backend):
-        # resolve_backend_name -> get_backend_class raises KeyError carrying the
-        # available-backend list. Surface it as a CLI state message rather than
-        # letting it escape as a stack trace.
+        # resolve_backend_name -> get_backend_class raises this specific
+        # KeyError carrying the available-backend list. Surface it as a CLI
+        # state message rather than letting it escape as a stack trace. A
+        # bare KeyError from anywhere else falls through to State E.
         emit(f"\n  Unknown backend selected for {palace_path}: {e.args[0] if e.args else e}")
         emit("  Set --backend or MEMPALACE_BACKEND to a registered backend.")
+        return None
+    except KeyError as e:
+        # Not the registry's KeyError: a lookup inside the backend failed
+        # while resolving the name. State E's diagnostics, with the cause.
+        emit(f"\n  Error opening palace at {palace_path}: {str(e) or type(e).__name__}")
+        emit("  Try: mempalace repair-status --palace <path>")
         return None
     detected = detect_backend_for_path(palace_path)
     if detected is None:

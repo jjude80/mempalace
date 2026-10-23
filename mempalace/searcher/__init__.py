@@ -27,6 +27,7 @@ from typing import Optional
 from ..backends import (
     BackendError,
     BackendMismatchError,
+    BackendUnavailableError,
     CollectionNotInitializedError,
     PalaceNotFoundError,
     UnsupportedCapabilityError,

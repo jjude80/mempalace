@@ -377,11 +377,31 @@ def _backend_mismatch_result(error: BackendMismatchError) -> dict:
     )
 
 
-def _unknown_backend_result(error: KeyError) -> dict:
+def _unknown_backend_result(error: BackendUnavailableError) -> dict:
+    """The selected backend name is not registered in this process.
+
+    Only the registry raises this. Callers must not route a plain ``KeyError``
+    here: a dict lookup failure inside an open backend (a dead chroma handle,
+    a typed-result key) is a backend fault, and calling it "Unknown backend"
+    sends the reader after the configuration instead of the backend.
+    """
     return _search_error_result(
         "Unknown backend",
         details=str(error),
         hint="Check MEMPALACE_BACKEND or the configured backend name.",
+    )
+
+
+def _backend_open_error_result(error: Exception) -> dict:
+    """A non-registry failure raised while opening or querying the palace.
+
+    Keeps the real cause in ``details`` so the error names the subsystem that
+    actually failed instead of blaming the backend selection.
+    """
+    return _search_error_result(
+        "Backend error",
+        details=str(error),
+        hint="Check the selected backend configuration and availability.",
     )
 
 
@@ -568,8 +588,12 @@ def _vector_disabled_search(
         backend_name = resolve_backend_name(palace_path)
     except BackendMismatchError as e:
         return _backend_mismatch_result(e)
-    except KeyError as e:
+    except BackendUnavailableError as e:
         return _unknown_backend_result(e)
+    except KeyError as e:
+        # Not the registry's KeyError: a backend lookup failed. Report the
+        # backend, not the backend *selection*.
+        return _backend_open_error_result(e)
     if backend_name != "chroma":
         return _search_error_result(
             "vector_disabled fallback is Chroma-only",

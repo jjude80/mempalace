@@ -27,6 +27,7 @@ from ..backends import (
     BackendClosedError,
     BackendError,
     BackendMismatchError,
+    BackendUnavailableError,
     CollectionNotInitializedError,
     PalaceNotFoundError,
     PalaceRef,

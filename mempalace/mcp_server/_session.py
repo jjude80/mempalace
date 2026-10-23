@@ -9,6 +9,35 @@ if __name__ != "mempalace.mcp_server":
 BACKEND_OPEN_FAILED_ERROR = "Backend open failed"
 
 
+def _backend_resolution_error(exc) -> dict:
+    """The tool result for a backend that would not resolve or open.
+
+    ``BackendUnavailableError`` is the registry's own ``KeyError``, and the
+    only one that means the selected backend *name* is unknown. Every other
+    ``KeyError`` is a lookup failure inside an open backend — a dead chroma
+    client, a typed-result key — and must keep its real cause: reporting it as
+    "Unknown backend" sent operators after the configuration while the palace
+    was the thing that had failed.
+    """
+    if isinstance(exc, BackendMismatchError):
+        return {
+            "error": "Backend mismatch",
+            "details": str(exc),
+            "hint": "Select the matching backend or use a fresh palace directory.",
+        }
+    if isinstance(exc, BackendUnavailableError):
+        return {
+            "error": "Unknown backend",
+            "details": str(exc),
+            "hint": "Check MEMPALACE_BACKEND or the configured backend name.",
+        }
+    return {
+        "error": "Backend error",
+        "details": str(exc) or type(exc).__name__,
+        "hint": "Check the selected backend configuration and availability.",
+    }
+
+
 def _stat_palace_db() -> tuple:
     """Return ``(st_ino, st_mtime)`` of the palace's chroma.sqlite3, or ``(0, 0.0)``."""
     try:
@@ -235,13 +264,7 @@ def _get_collection(create=False):
         backend_name = _selected_backend_name()
     except (BackendMismatchError, KeyError) as exc:
         logger.warning("backend resolution failed for %s: %s", _config.palace_path, exc)
-        _collection_open_error = {
-            "error": "Backend mismatch"
-            if isinstance(exc, BackendMismatchError)
-            else "Unknown backend",
-            "details": str(exc),
-            "hint": "Select the matching backend or use a fresh palace directory.",
-        }
+        _collection_open_error = _backend_resolution_error(exc)
         _collection_cache = None
         _collection_cache_backend = None
         _collection_cache_palace = None
@@ -289,13 +312,7 @@ def _get_collection(create=False):
                 return _collection_cache
             except (BackendMismatchError, KeyError) as exc:
                 logger.warning("backend open failed for %s: %s", _config.palace_path, exc)
-                _collection_open_error = {
-                    "error": "Backend mismatch"
-                    if isinstance(exc, BackendMismatchError)
-                    else "Unknown backend",
-                    "details": str(exc),
-                    "hint": "Select the matching backend or use a fresh palace directory.",
-                }
+                _collection_open_error = _backend_resolution_error(exc)
                 _collection_cache = None
                 _collection_cache_backend = None
                 _collection_cache_palace = None
@@ -430,13 +447,7 @@ def _get_collection(create=False):
                 _invalidate_overview_caches()
             return _collection_cache
         except (BackendMismatchError, KeyError) as exc:
-            _collection_open_error = {
-                "error": "Backend mismatch"
-                if isinstance(exc, BackendMismatchError)
-                else "Unknown backend",
-                "details": str(exc),
-                "hint": "Select the matching backend or use a fresh palace directory.",
-            }
+            _collection_open_error = _backend_resolution_error(exc)
             _client_cache = None
             _collection_cache = None
             _collection_cache_backend = None

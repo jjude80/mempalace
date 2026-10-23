@@ -10,8 +10,13 @@ def _open_search_collection(palace_path: str, collection_name: str):
         ), None
     except BackendMismatchError as e:
         return None, _backend_mismatch_result(e)
-    except KeyError as e:
+    except BackendUnavailableError as e:
         return None, _unknown_backend_result(e)
+    except KeyError as e:
+        # A KeyError that is not the registry's is a failed lookup inside the
+        # backend (a dead client, a typed-result key), not an unknown backend.
+        logger.error("Backend error opening palace at %s: %s", palace_path, e)
+        return None, _backend_open_error_result(e)
     except (CollectionNotInitializedError, PalaceNotFoundError) as e:
         logger.error("No palace found at %s: %s", palace_path, e)
         return None, _search_error_result(

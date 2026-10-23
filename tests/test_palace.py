@@ -152,6 +152,31 @@ def test_open_collection_or_explain_unknown_backend(tmp_path, monkeypatch):
     assert any("does_not_exist" in line for line in lines)
 
 
+def test_open_collection_or_explain_other_keyerror_keeps_its_cause(tmp_path, monkeypatch):
+    """Only the registry's KeyError means an unknown backend name.
+
+    A KeyError from inside a backend (a dead chroma handle) used to read as a
+    MEMPALACE_BACKEND typo; it must keep its cause and route to diagnostics.
+    """
+    from mempalace import palace as palace_module
+
+    emit, lines = _capture()
+    palace = tmp_path / "palace"
+    palace.mkdir()
+
+    def raise_dead_handle(*args, **kwargs):
+        raise KeyError("_type")
+
+    monkeypatch.setattr(palace_module, "resolve_backend_name", raise_dead_handle)
+
+    result = _open_collection_or_explain(str(palace), out=emit)
+
+    assert result is None
+    assert not any("Unknown backend selected" in line for line in lines)
+    assert any("_type" in line for line in lines)
+    assert any("repair-status" in line for line in lines)
+
+
 def test_open_collection_or_explain_state_d_healthy(tmp_path):
     """State D: healthy palace — returns the opened collection silently."""
     emit, lines = _capture()

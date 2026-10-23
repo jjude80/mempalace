@@ -85,7 +85,12 @@ from .. import (  # noqa: E402
 )
 from .._env import env_bool, env_float, env_int, env_list, env_str  # noqa: E402
 from .._once import first_time  # noqa: E402
-from ..backends import BackendMismatchError, PalaceRef, detect_backend_for_path  # noqa: E402
+from ..backends import (  # noqa: E402
+    BackendMismatchError,
+    BackendUnavailableError,
+    PalaceRef,
+    detect_backend_for_path,
+)
 from ..backends.base import (  # noqa: E402
     DimensionMismatchError,
     EmbedderIdentityMismatchError,

@@ -41,6 +41,7 @@ from .milvus import MilvusBackend, MilvusCollection
 from .pgvector import PgVectorBackend, PgVectorCollection
 from .qdrant import QdrantBackend, QdrantCollection
 from .registry import (
+    BackendUnavailableError,
     available_backends,
     detect_backend_for_path,
     detect_backends_for_path,
@@ -60,6 +61,7 @@ __all__ = [
     "BackendClosedError",
     "BackendError",
     "BackendMismatchError",
+    "BackendUnavailableError",
     "BaseBackend",
     "BaseCollection",
     "ChromaBackend",
