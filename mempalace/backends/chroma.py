@@ -3008,39 +3008,34 @@ class ChromaBackend(BaseBackend):
 
         # Collection opens and creates write to chroma.sqlite3.
         with palace_db_lock(os.path.join(palace_path, "chroma.sqlite3")):
-            client = self._client(palace_path)
-
-            if create:
-                try:
-                    collection = client.get_collection(collection_name, **ef_kwargs)
-                except _ChromaNotFoundError:
-                    if caller_vectors:
-                        collection = client.create_collection(
-                            collection_name,
-                            schema=_caller_vector_schema(options),
-                            embedding_function=None,
-                        )
-                    else:
-                        collection = client.create_collection(
-                            collection_name,
-                            metadata=_hnsw_creation_metadata(options),
-                            **ef_kwargs,
-                        )
-                except ValueError as e:
-                    explanation = self._explain_ef_mismatch(e, palace_path)
-                    if explanation:
-                        raise EmbeddingFunctionMismatchError(explanation) from e
+            open_kwargs = {
+                "collection_name": collection_name,
+                "create": create,
+                "caller_vectors": caller_vectors,
+                "options": options,
+                "ef_kwargs": ef_kwargs,
+                "palace_path": palace_path,
+            }
+            try:
+                collection = self._open_collection_once(self._client(palace_path), **open_kwargs)
+            except Exception as exc:
+                # ``_client()`` checks a cached handle before returning it, but
+                # another thread can stop chroma's shared ``System`` between
+                # that check and this open. The client is dead by the time we
+                # use it, and the caller sees a storage failure for a palace
+                # that is perfectly readable (NEXA-433). Repair and retry once,
+                # exactly as ``make_client()`` does for a failed construction.
+                if not _looks_like_stopped_system(exc):
                     raise
-            else:
-                try:
-                    collection = client.get_collection(collection_name, **ef_kwargs)
-                except _ChromaNotFoundError as e:
-                    raise CollectionNotInitializedError(palace_path) from e
-                except ValueError as e:
-                    explanation = self._explain_ef_mismatch(e, palace_path)
-                    if explanation:
-                        raise EmbeddingFunctionMismatchError(explanation) from e
-                    raise
+                logger.warning(
+                    "Reopening palace %s after a stopped chroma System while "
+                    "opening the collection: %s",
+                    palace_path,
+                    exc,
+                )
+                self.close_palace(palace_path)
+                _clear_chroma_system_cache()
+                collection = self._open_collection_once(self._client(palace_path), **open_kwargs)
             if caller_vectors:
                 _require_caller_vector_collection(collection)
             elif not read_only:
@@ -3056,6 +3051,53 @@ class ChromaBackend(BaseBackend):
         )
         wrapped._require_embeddings = caller_vectors
         return wrapped
+
+    def _open_collection_once(
+        self,
+        client,
+        *,
+        collection_name: str,
+        create: bool,
+        caller_vectors: bool,
+        options,
+        ef_kwargs: dict,
+        palace_path: str,
+    ):
+        """Open (or create) the collection on ``client`` — one attempt.
+
+        Kept separate from :meth:`get_collection` so the caller can rebuild a
+        client whose chroma ``System`` was stopped by another thread after
+        ``_client()`` had already validated it, and retry this step alone.
+        """
+        if create:
+            try:
+                return client.get_collection(collection_name, **ef_kwargs)
+            except _ChromaNotFoundError:
+                if caller_vectors:
+                    return client.create_collection(
+                        collection_name,
+                        schema=_caller_vector_schema(options),
+                        embedding_function=None,
+                    )
+                return client.create_collection(
+                    collection_name,
+                    metadata=_hnsw_creation_metadata(options),
+                    **ef_kwargs,
+                )
+            except ValueError as e:
+                explanation = self._explain_ef_mismatch(e, palace_path)
+                if explanation:
+                    raise EmbeddingFunctionMismatchError(explanation) from e
+                raise
+        try:
+            return client.get_collection(collection_name, **ef_kwargs)
+        except _ChromaNotFoundError as e:
+            raise CollectionNotInitializedError(palace_path) from e
+        except ValueError as e:
+            explanation = self._explain_ef_mismatch(e, palace_path)
+            if explanation:
+                raise EmbeddingFunctionMismatchError(explanation) from e
+            raise
 
     def close_palace(self, palace) -> None:
         """Drop cached handles for ``palace`` and release its SQLite file lock.

@@ -145,3 +145,52 @@ def test_search_recovers_after_stopped_system(monkeypatch, config, palace_path, 
     found = tool_search("hub restarts itself chroma bindings", limit=5)
     assert "error" not in found, f"search must recover, got: {found.get('error')}"
     assert found["results"], "the drawer filed before the failure must come back"
+
+
+def test_collection_open_retries_when_system_stops_after_client_check(tmp_path, monkeypatch):
+    """A ``System`` stopped between ``_client()``'s check and the open retries.
+
+    ``_client()`` rejects a cached client whose bindings are already gone, but
+    chroma's shared ``System`` can stop *after* that check and before
+    ``client.get_collection`` runs. The open then raises the stopped-``System``
+    error, and the search path reports a backend/palace failure for a palace
+    that is readable — NEXA-433. The open must be repaired and retried once.
+    """
+    from mempalace.backends import PalaceRef, chroma as chroma_module
+    from mempalace.backends.chroma import ChromaBackend
+
+    backend = ChromaBackend()
+    palace = tmp_path / "palace"
+    ref = PalaceRef(id=str(palace), local_path=str(palace))
+    try:
+        backend.get_collection(palace=ref, collection_name="mempalace_drawers", create=True)
+
+        client = backend._clients[str(palace)]
+        real_get_collection = client.get_collection
+        calls = {"n": 0}
+
+        def flaky_get_collection(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise AttributeError("'RustBindingsAPI' object has no attribute 'bindings'")
+            return real_get_collection(*args, **kwargs)
+
+        monkeypatch.setattr(client, "get_collection", flaky_get_collection)
+        cleared = {"n": 0}
+        real_clear = chroma_module._clear_chroma_system_cache
+
+        def counting_clear():
+            cleared["n"] += 1
+            return real_clear()
+
+        monkeypatch.setattr(chroma_module, "_clear_chroma_system_cache", counting_clear)
+
+        reopened = backend.get_collection(
+            palace=ref, collection_name="mempalace_drawers", create=False
+        )
+    finally:
+        backend.close()
+
+    assert calls["n"] == 1, "precondition: the first open used the dead client"
+    assert cleared["n"] == 1, "the stopped System must be dropped before the retry"
+    assert reopened is not None
